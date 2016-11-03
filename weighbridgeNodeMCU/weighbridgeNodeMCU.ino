@@ -1188,9 +1188,6 @@ float median(float *values, size_t arraySize) {
 */
   tmp = 0.0;
   for (size_t i=arraySize/2-relVal; i<arraySize/2+relVal+1; tmp +=values[i++]) {}
-
-  Serial << "tmp: " << tmp << endl;
-
   return tmp/(relVal*2+1);
 }
 
@@ -1303,7 +1300,7 @@ void loop(void)
 
   tft_WDayRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_wday );
 
-  tft_TimeRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_hour, tblock->tm_min, tblock->tm_sec);
+  tft_TimeRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_hour-1, tblock->tm_min, tblock->tm_sec);
   tft_TimeQuoteRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK );
   tft_TimeDotRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK );
 
@@ -1322,13 +1319,14 @@ void loop(void)
 
 //  tft_FreeSDRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(weigthCurrent) );
 
+/*
   // send only one time per minute
   if (rawtime - tsSendTime > 60 ) {
     thingSpeakServer[0].tsDataSet[3] = String(weigthCurrent);
     saveData2ThingsSpeak();
     tsSendTime = rawtime;
   }
-
+*/
   looptime = millis() - looptime;
 
   tft_FreeSDRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(looptime) );
