@@ -1,4 +1,6 @@
 
+
+
 /***************************************************
  Electronical weighbridge
 
@@ -7,7 +9,7 @@
  ****************************************************/
 
 #define PRG_NAME_SHORT  "EWB"
-#define PRG_VERSION     "0.1.0"
+#define PRG_VERSION     "0.2.0"
 
 //#define RELEASE          // switch on release mode.. (no debug mode, small foortprint)
 #define DEBUG            // debug mode on/off
@@ -18,12 +20,15 @@
 
 
 #include <Arduino.h>
-#include <Streaming.h>      // from: http://arduiniana.org/libraries/streaming/
+#include <Streaming.h>      // http://arduiniana.org/libraries/streaming/
+#include <ArduinoJson.h>    // https://github.com/bblanchon/ArduinoJson
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
+
+//#include <EEPROM.h>
 
 
 //#include <Time.h>
@@ -32,38 +37,40 @@
 
 #include "SPI.h"
 #include "Adafruit_GFX.h"
-#include "Adafruit_ILI9341.h"
+#include "Adafruit_ILI9341.h" // https://github.com/adafruit/Adafruit_ILI9341
 #include "time_ntp.h"
 
+#include <OneWire.h>
 #include <Q2HX711.h>
 
-// https://github.com/adafruit/Adafruit_ILI9341
-
-// === new by Zentris ===
-#define NodeMCU_D0  16   // RST
-#define NodeMCU_D1   5    // DC
-static const unsigned int NodeMCU_D2  = 4;    // SPI-CS
-static const unsigned int NodeMCU_D3  = 0;
-static const unsigned int NodeMCU_D4  = 2;
-static const unsigned int NodeMCU_D5  = 14;   // SPI-CLK
-static const unsigned int NodeMCU_D6  = 12;   // SPI-MISO
-static const unsigned int NodeMCU_D7  = 13;   // SPI-MOSI
-static const unsigned int NodeMCU_D8  = 15;
-static const unsigned int NodeMCU_D9  = 3;
-static const unsigned int NodeMCU_D10 = 1;
-
-#define TFT_CS          NodeMCU_D2
-#define TFT_RST         NodeMCU_D0
-#define TFT_DC          NodeMCU_D1
-#define TFT_MOSI        NodeMCU_D7
-#define TFT_CLK         NodeMCU_D5
-#define PIN_BACKLIGHT   NodeMCU_D4
-#define TFT_MISO        NodeMCU_D6
-
-#define TTY_USE 1         // Switch on/off output of TTY (off = 0)
 #define TTY_SPEED 115200  // Serial speed
 
+// === new by Zentris ===
+// Order NodeMCO Pins to GPIO numbers
+#define NodeMCU_D0   16    // ILI9341: RST
+#define NodeMCU_D1    5    // ILI9341: SPI-DC
+#define NodeMCU_D2    4    // ILI9341: SPI-CS
+#define NodeMCU_D3    0    // HX711: data pin
+#define NodeMCU_D4    2    // 1Wire: sensor DS18B20
+#define NodeMCU_D5   14    // ILI9341: SPI-CLK
+#define NodeMCU_D6   12    // ILI9341: SPI-MISO
+#define NodeMCU_D7   13    // ILI9341: SPI-MOSI
+#define NodeMCU_D8   15    // HX711: clock pin
+#define NodeMCU_D9    3
+#define NodeMCU_D10   1
+
+// Order ILI9341 to NodeMCU Pins
+#define TFT_RST         NodeMCU_D0
+#define TFT_DC          NodeMCU_D1
+#define TFT_CS          NodeMCU_D2
+#define PIN_BACKLIGHT   NodeMCU_D4   // fixed on Vcc
+#define TFT_CLK         NodeMCU_D5
+#define TFT_MISO        NodeMCU_D6
+#define TFT_MOSI        NodeMCU_D7
+
 #define SIGNAL_LED      LED_BUILTIN   // internal LED ! (blue)
+
+#define DS18B20_GPIO    NodeMCU_D4
 
 /* ---------------------------------------------
    --- NTP server ip ---
@@ -98,8 +105,10 @@ struct accessPoint {const char* SSID; const char* PASSWORD;};
                 It means, the number sensorId number is the field number
                 off Thingspeak fields.
 */
-#define numberOfTSFields 4  // (field # "0" for comments!)
+#define numberOfTSFields 5  // (field # "0" for comments!)
 struct tsData {String tsServer; String tsServerIP; String tsAPIKey; String tsDataSet[numberOfTSFields];};
+
+#include "privates.h"
 
 
 uint8_t MACArray[6];                  // return type of mac request
@@ -125,10 +134,13 @@ static const float factorCalibrate2g = 199.0/428.0;
 static unsigned int measurementLoop = 0;
 static float correkture2null = 82244.8 - 33.5;
 static float weight    = 0;
-static float weigthCurrent = 0;
+static float weightCurrent = 0;
 static float dataArray[MEASURING_COUNT];
 
-#include "privates.h"
+static float temperature;
+static bool  temperature_valid = false;
+static unsigned long tempLoopCnt = 0;
+
 
 #define NTP_REFRESH_AFTER          3600*1000  // after what time the ntp
                                               // timestamp will be refreshed
@@ -141,9 +153,10 @@ ESP8266WebServer server(80);
 
 Q2HX711 hx711(hx711_data_pin, hx711_clock_pin);  // initialise HX711
 
+OneWire  DS18B20(DS18B20_GPIO);
 
-// Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
+
 
 #define FIXED_FONT_CHAR_WIDTH   6
 #define FIXED_FONT_CHAR_HEIGHT  8
@@ -290,23 +303,6 @@ int tft_vert_spacing;
 
 #define DISPLAY_REFRESH_INTERVALL 900
 
-struct cursor {int xpos; int ypos; int bgcol; int fgcol;};
-static cursor lastcursor;
-
-void saveCursor(int xpos, int ypos, int bgcol, int fgcol) {
-  lastcursor.xpos = xpos;
-  lastcursor.ypos = ypos;
-  lastcursor.bgcol = bgcol;
-  lastcursor.fgcol = fgcol;
-}
-
-void restoreCursor(int &xpos, int &ypos, int &bgcol, int &fgcol) {
-  xpos = lastcursor.xpos;
-  ypos = lastcursor.ypos;
-  bgcol= lastcursor.bgcol;
-  fgcol= lastcursor.fgcol;
-}
-
 void tft_SetTextCursor( int column, int line ) {
   tft.setCursor( ((tft_text_size * tft_char_width) + tft_hor_spacing) * (column-1),
                 ((tft_text_size * tft_char_height) + tft_vert_spacing ) * (line-1) );
@@ -343,8 +339,13 @@ void tft_drawFrameLabels(void)
 */
 //  tft.setCursor( tft.getCursorX()+(6 * tft_text_size*tft_char_width), tft.getCursorY() );
 
+  int xSave = tft.getCursorX()+ tft_char_width;
+
   tft.setCursor( tft.getCursorX()+ tft_char_width, tft.getCursorY() + 2*tft_char_height );
   tft.print("GEWICHT");
+
+  tft.setCursor( xSave, 34 + tft.getCursorY() + 2*tft_char_height );
+  tft.print("TEMPgrdC");
 
   tft_text_size = textSizeSave;
   tft.setTextSize(tft_text_size);
@@ -739,20 +740,22 @@ void tft_TempDotRefresh(int displayTextColor, int displayBgColor, int textColor,
 //
 // ************
 //
-void tft_LoadRefresh(int displayTextColor, int displayBgColor, int textColor, int bgColor, int load, int tenth )
+void tft_LoadRefresh(int displayTextColor, int displayBgColor, int textColor, int bgColor, int aWeight, float aTemp )
 {
-  static int lastLoad, lastTenth;
+  static int lastWeight;
+  static float lastTemp;
   static unsigned long mSecs;
   int savX, savY;
-  char cOutBuf[3];
+  char cOutBuf[10];
 
   if( millis() - mSecs >= DISPLAY_REFRESH_INTERVALL )
   {
-    if ( load != lastLoad ) {
+    if ( aWeight != lastWeight || aTemp != lastTemp ) {
       savX = tft.getCursorX();
       savY = tft.getCursorY();
 
-      lastLoad = load;
+      lastWeight = aWeight;
+      lastTemp = aTemp;
 
       tft.setTextSize( MEDIUM_TEXT_SIZE );
 
@@ -760,20 +763,21 @@ void tft_LoadRefresh(int displayTextColor, int displayBgColor, int textColor, in
       tft.setCursor(  POS_LOAD_LOAD_X, POS_LOAD_LOAD_Y );
 
       tft.print("     ");
-      sprintf(cOutBuf, "%4dg", load);
+      sprintf(cOutBuf, "%4dg", aWeight);
       tft.setTextColor(displayTextColor, displayBgColor );
       tft.setCursor(  POS_LOAD_LOAD_X, POS_LOAD_LOAD_Y );
       tft.print(cOutBuf);
 
-/*
+
       tft.setTextColor(displayBgColor, displayBgColor);
-      tft.setCursor(  POS_LOAD_TENTH_X, POS_LOAD_TENTH_Y );
-      tft.print(" ");
-      sprintf(cOutBuf, "%2d", tenth);
+      tft.setCursor(  POS_LOAD_LOAD_X, POS_LOAD_TENTH_Y );
+      tft.print("     ");
+//      sprintf(cOutBuf, "%5.2f", aTemp);
       tft.setTextColor(displayTextColor, displayBgColor );
-      tft.setCursor(  POS_LOAD_TENTH_X, POS_LOAD_TENTH_Y );
-      tft.print(cOutBuf);
-*/
+      tft.setCursor(  POS_LOAD_LOAD_X, POS_LOAD_TENTH_Y );
+//      tft.print(cOutBuf);
+      tft.print(String(aTemp, 2));
+
       tft.setCursor( savX, savY );
       tft.setTextColor(textColor, bgColor);
 
@@ -990,7 +994,7 @@ void tft_FreeMemRefresh(int displayTextColor, int displayBgColor, int textColor,
 //
 void tft_FreeSDRefresh(int displayTextColor, int displayBgColor, int textColor, int bgColor, unsigned long freesd )
 {
-  static unsigned long mSecs;
+//  static unsigned long mSecs;
   static unsigned long lastFreeSD;
   int savX, savY;
   char cOutBuf[6];
@@ -1021,43 +1025,61 @@ void tft_FreeSDRefresh(int displayTextColor, int displayBgColor, int textColor, 
 }
 
 
-/**
+/** ***********************************************
  * Get back the current Sketch name and version.
  */
 String getSketchVersion() {
-  return String("\n" + String(F(PRG_NAME_SHORT)) + " - " +
-         String(F(PRG_VERSION)) + F(" / CompTime:")  +
-         __DATE__ + F(" - ") + __TIME__ + F("\n"));
+  return String(String(F(PRG_NAME_SHORT)) + " " +
+         String(F(PRG_VERSION)) + F(" | CompTime: ")  +
+         __DATE__ + F(" - ") + __TIME__);
 }
 
-/**
+/** ***********************************************
  * Get back the current Sketch name and version for display
  */
 String getSketchVersion4Display() {
   return String(String(F(PRG_NAME_SHORT)) + " - " + String(F(PRG_VERSION)));
 }
 
-/**
- * Create a date string with format "YYYY-MM-DD" from global 'date' variable.
- * @return: String Format: "YYYY-MM-DD"
+/** ***********************************************
+ * Create a date string with format "DD.MM-YYY" from global 'tblock' variable.
+ * @return: String Format: "DD.MM-YYYY"
+ * @todo: adjust comment
  */
-String getDatum() {
+String getDate(const unsigned int aOrder = 0) {
   char s[12];
-  sprintf(s, "%04d.%02d.%02d", date->year+2000, date->month, date->day);
-  return(String(s));
+  switch (aOrder) {
+    case 0 :
+      sprintf(s, "%02d.%02d.%04d", tblock->tm_mday, 1 + tblock->tm_mon, 1900 + tblock->tm_year);
+      break;
+    case 1 :
+      sprintf(s, "%04d.%02d.%02d", 1900 + tblock->tm_year, 1 + tblock->tm_mon, tblock->tm_mday);
+      break;
+    default :
+      return "-";
+  }
+  return (String(s));
 }
 
-/**
- * Create a time string with format"hh:mm:ss" from global 'date' variable.
+/** ***********************************************
+ * Create a time string with format"hh:mm:ss" from global 'tblock' variable.
  * @return: String Format: "hh:mm:ss"
  */
 String getTime() {
   char s[12];
-  sprintf(s, "%02d:%02d:%02d", date->hour, date->minute, date->second);
-  return(String(s));
+  sprintf(s, "%02d:%02d:%02d", tblock->tm_hour, tblock->tm_min, tblock->tm_sec);
+  return (String(s));
 }
 
-/**
+/** ***********************************************
+ * Create a full timestamp string with format"hh:mm:ss" from global 'tblock' variable.
+ * @return: String Format: "hh:mm:ss"
+ */
+String getDateAndTime(const unsigned int aOrder = 0) {
+  return getDate(aOrder) + "   " + getTime();
+}
+
+/** ***********************************************
  * Convert the given  address array into a printable format
  * @return: "111.222.333.444" - Format (decimal)
  */
@@ -1067,21 +1089,19 @@ const String getCurrentIpAsString(IPAddress aIp) {
   return(String(s));
 }
 
-/**
+/** ***********************************************
  * Get the current time (UTC) from NTP server and fill the 'date" structure
  */
 time_t getDateTimeNTP() {
   ulSecs2000_timer=getNTPTimestamp(ipAddrNTPServer)+3600;    // add +3600 sec (1h) for MET
   epoch_to_date_time(date, ulSecs2000_timer); // fresh up the date structure
   ulSecs2000_timer -= millis()/1000;          // keep distance to millis counter at now
-  if (TTY_USE) {
-    Serial << F("Current Time UTC from NTP server: ") << epoch_to_string(ulSecs2000_timer) << endl;
-  }
+  Serial << F("Current Time UTC from NTP server: ") << epoch_to_string(ulSecs2000_timer) << endl;
   ntpdRefreshTime = ulSecs2000_timer + NTP_REFRESH_AFTER; // setze erneutes Zeitholen
   return ulSecs2000_timer;
 }
 
-/**
+/** ***********************************************
  *  Starts the WiFi client and get the current time from a ntp server
  */
 void WiFiStart() {
@@ -1103,7 +1123,7 @@ void WiFiStart() {
 }
 
 
-/**
+/** ***********************************************
  * Send data to a valid ThingsSpeak account
 */
 void saveData2ThingsSpeak() {
@@ -1158,12 +1178,7 @@ void saveData2ThingsSpeak() {
 }
 
 
-
-//
-// ************
-//
-
-/**
+/** ***********************************************
  * Simple median/average calculation
  * ------------------------------------
  * Getting array will be sorted and now get the average over the middle values
@@ -1188,10 +1203,11 @@ float median(float *values, size_t arraySize) {
 */
   tmp = 0.0;
   for (size_t i=arraySize/2-relVal; i<arraySize/2+relVal+1; tmp +=values[i++]) {}
+//  Serial << "tmp: " << tmp << endl;
   return tmp/(relVal*2+1);
 }
 
-/*
+/** ***********************************************
  *
  */
 float messung() {
@@ -1206,22 +1222,140 @@ float messung() {
   else {
     measurementLoop = 0;
     float x = median(dataArray, MEASURING_COUNT);
-
     return round(factorCalibrate2g * (x-correkture2null));
   }
-  return weigthCurrent;
+  return weightCurrent;
 }
 
+/** ***********************************************
+ * Write out a simple string in case of task not found
+ */
 void handleNotFound(){
   server.send(404, "text/plain", "File Not Found\n\n");
 }
 
+/** ***********************************************
+ * Write out a simple hello string
+ */
 void handleRoot() {
   server.send(200, "text/plain", "hello from esp8266!");
 }
 
+/** ***********************************************
+ * Write out a simple string with the weight are measured
+ */
+void handleVersion() {
+  server.send(200, "text/plain", getSketchVersion());
+}
+
+/** ***********************************************
+ * Write out a simple string with the weight are measured
+ */
 void handleWeigth() {
-  server.send(200, "text/plain", String(weigthCurrent));
+  server.send(200, "text/plain", String(weightCurrent));
+}
+
+/** ***********************************************
+ * Write out a simple string with the temperature are measured
+ */
+void handleTemperature() {
+  server.send(200, "text/plain", String(temperature));
+}
+
+/** ***********************************************
+ * Write out a full data set in json format
+ */
+void handleJSON() {
+  StaticJsonBuffer<200> jsonBuf;
+
+  JsonObject& root = jsonBuf.createObject();
+  root["Version"] = getSketchVersion();
+  root["Date"] = getDateAndTime();
+  root["weight"] = weightCurrent;
+  root["temperature"] = temperature;
+
+  String outPrint;
+  root.printTo(outPrint);
+  server.send(200, "text/json", outPrint);
+}
+/*
+ *
+ */
+bool readDS18B20() {
+  byte i;
+  byte present = 0;
+  byte type_s;
+  byte data[12];
+  byte addr[8];
+
+  temperature_valid = false;
+
+  if (!DS18B20.search(addr)) {
+//    Serial << F("No more addresses.") << endl;
+    DS18B20.reset_search();
+    return temperature_valid;
+  }
+
+/*
+  Serial << F("ROM =");
+  for (i = 0; i < 8; i++) { Serial << F(" ") << String(addr[i], HEX); }
+*/
+  if (OneWire::crc8(addr, 7) != addr[7]) {
+      Serial << F("CRC is not valid!") << endl;
+      return temperature_valid;
+  }
+
+  // the first ROM byte indicates which chip
+  switch (addr[0]) {
+    case 0x10: type_s = 1; break;
+    case 0x28: type_s = 0; break;
+    case 0x22: type_s = 0; break;
+    default:   Serial << F("Device is not a DS18x20 family device.") << endl;
+               return temperature_valid;
+  }
+
+  DS18B20.reset();
+  DS18B20.select(addr);
+  DS18B20.write(0x44, 1);        // start conversion, with parasite power on at the end
+
+  delay(1000);     // maybe 750ms is enough, maybe not
+  // we might do a ds.depower() here, but the reset will take care of it.
+
+  present = DS18B20.reset();
+  DS18B20.select(addr);
+  DS18B20.write(0xBE);         // Read Scratchpad
+
+//  Serial << F("  Data = ") << String(present, HEX) << F(" ");
+  for ( i = 0; i < 9; i++) {           // we need 9 bytes
+    data[i] = DS18B20.read();
+//    Serial << String(data[i], HEX) << F(" ");
+  }
+//  Serial << F("  CRC=") << String(OneWire::crc8(data, 8), HEX) << endl;
+
+  // Convert the data to actual temperature
+  // because the result is a 16 bit signed integer, it should
+  // be stored to an "int16_t" type, which is always 16 bits
+  // even when compiled on a 32 bit processor.
+  int16_t raw = (data[1] << 8) | data[0];
+  if (type_s) {
+    raw = raw << 3; // 9 bit resolution default
+    if (data[7] == 0x10) {
+      // "count remain" gives full 12 bit resolution
+      raw = (raw & 0xFFF0) + 12 - data[6];
+    }
+  } else {
+    byte cfg = (data[4] & 0x60);
+    // at lower res, the low bits are undefined, so let's zero them
+    if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+    else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+    else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+    //// default is 12 bit resolution, 750 ms conversion time
+  }
+
+  temperature_valid = true;
+  temperature = (float)raw / 16.0;
+//  Serial << F("  Temperature = ") << temperature << F(" Celsius, ") << endl;
+  return temperature_valid;
 }
 
 
@@ -1272,12 +1406,17 @@ void setup() {
   getDateTimeNTP();
 
   server.on("/", handleRoot);
+  server.on("/version", handleVersion);
   server.on("/weigth", handleWeigth);
+  server.on("/temp", handleTemperature);
+  server.on("/json", handleJSON);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("HTTP server started");
 
   tsSendTime = ulSecs2000_timer + millis()/1000UL + 946684800UL;
+
+//  EEPROM.begin(EEPROM_SIZE);
 }
 
 
@@ -1285,14 +1424,14 @@ void loop(void)
 {
   looptime = millis();
 
-  rawtime = ulSecs2000_timer + millis()/1000UL + 946684800UL + 3600UL;  // in seconds since ...
+  rawtime = ulSecs2000_timer + millis()/1000UL + 946684800UL;  // in seconds since ...
   tblock = localtime(&rawtime);
 
   server.handleClient();
 
   weight = messung();
-//  Serial << "weight:" << weight << "\t\tweigthCurrent: " << weigthCurrent << endl;
-  if (weight != weigthCurrent) weigthCurrent = weight;
+//  Serial << "weight:" << weight << "\t\tweigthCurrent: " << weightCurrent << endl;
+  if (weight != weightCurrent) weightCurrent = weight;
 
   tft_DateRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_mday, 1 + tblock->tm_mon, 1900 + tblock->tm_year);
   tft_DateDot1Refresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK );
@@ -1300,14 +1439,14 @@ void loop(void)
 
   tft_WDayRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_wday );
 
-  tft_TimeRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_hour-1, tblock->tm_min, tblock->tm_sec);
+  tft_TimeRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, tblock->tm_hour, tblock->tm_min, tblock->tm_sec);
   tft_TimeQuoteRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK );
   tft_TimeDotRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK );
 
 //  tft_TempRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, 23, 3 );
 //  tft_TempDotRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK);
 
-  tft_LoadRefresh(ILI9341_YELLOW, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(weigthCurrent), 2 );
+  tft_LoadRefresh(ILI9341_YELLOW, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(weightCurrent), temperature );
 //  tft_LoadDotRefresh(ILI9341_YELLOW, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK);
 
   tft_IPRefresh(ILI9341_WHITE, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, WiFi.localIP());
@@ -1317,21 +1456,28 @@ void loop(void)
 
   tft_FreeMemRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, ESP.getFreeHeap() );
 
-//  tft_FreeSDRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(weigthCurrent) );
+//  tft_FreeSDRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(weightCurrent) );
 
-/*
   // send only one time per minute
+/*
   if (rawtime - tsSendTime > 60 ) {
-    thingSpeakServer[0].tsDataSet[3] = String(weigthCurrent);
+    thingSpeakServer[0].tsDataSet[3] = String(weightCurrent);
+    thingSpeakServer[0].tsDataSet[4] = String(temperature);
+
     saveData2ThingsSpeak();
     tsSendTime = rawtime;
   }
 */
+  if (!(tempLoopCnt++ % 4)) {
+    readDS18B20();
+  }
+
+
   looptime = millis() - looptime;
 
   tft_FreeSDRefresh(ILI9341_GREEN, ILI9341_BLACK, ILI9341_WHITE, ILI9341_BLACK, int(looptime) );
 
-  Serial << F("Gewicht: ") << weigthCurrent << F("g") << F("\tlooptime: ") << looptime << endl;
+  Serial << F("Gewicht: ") << weightCurrent << F("g") << F("\tTemp:") << temperature << F("\tlooptime: ") << looptime << endl;
 
   delay( (looptime > 500) ? 500 : 500 - looptime) ;
 
