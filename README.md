@@ -9,5 +9,5 @@ For more information (currently only in german language) look also in my blog (h
 The measurement converter HX711 has a temperature drift.
 For measurement this drift it is now implemented a connector to a DS18B20 1-wire sensor. With this sensor i will currently only document the context between measured weight and the housing temperature of the HX711.
 
-The mesured weight and temperature will be now also offer via a small lokal webserver for request the data from my other project ("Erdfeuchtemessung")
+The mesured weight and temperature will be now also offer via a small local webserver for request the data from my other project ("Erdfeuchtemessung")
 
